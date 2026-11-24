@@ -526,7 +526,58 @@ fn handle_connection(
         return;
     }
 
+    if (std.mem.eql(u8, req.method, "POST") and (std.mem.eql(u8, req.path, "/v1/token/encode") or std.mem.eql(u8, req.path, "/tokenize") or std.mem.eql(u8, req.path, "/v1/tokenize"))) {
+        handle_token_encode(fd, req.body, tokenizer, buffers);
+        return;
+    }
+
     send_error_json(fd, 404, "Unknown endpoint", "invalid_request_error", buffers.response_buf);
+}
+
+fn handle_token_encode(
+    fd: i32,
+    body: []const u8,
+    tokenizer: *const tokenizer_mod.Tokenizer,
+    buffers: *ServerBuffers,
+) void {
+    var pos: usize = 0;
+    tokenizer_mod.skip_ws(body, &pos);
+    if (pos >= body.len or body[pos] != '{') {
+        send_error_json(fd, 400, "Invalid JSON body", "invalid_request_error", buffers.response_buf);
+        return;
+    }
+    pos += 1;
+
+    var text: []const u8 = "";
+    var key_buf: [64]u8 = undefined;
+    var iter: u32 = 0;
+    while (pos < body.len and iter < 32) : (iter += 1) {
+        tokenizer_mod.skip_ws(body, &pos);
+        if (pos < body.len and body[pos] == '}') break;
+        const k = tokenizer_mod.parse_json_string(body, &pos, &key_buf) orelse break;
+        tokenizer_mod.skip_ws(body, &pos);
+        if (pos >= body.len or body[pos] != ':') break;
+        pos += 1;
+        tokenizer_mod.skip_ws(body, &pos);
+        if (std.mem.eql(u8, k, "text") or std.mem.eql(u8, k, "prompt") or std.mem.eql(u8, k, "content")) {
+            if (tokenizer_mod.parse_json_string(body, &pos, buffers.render_buf)) |s| {
+                text = s;
+            }
+        } else {
+            tokenizer_mod.skip_json_value(body, &pos);
+        }
+        tokenizer_mod.skip_ws(body, &pos);
+        if (pos < body.len and body[pos] == ',') pos += 1;
+    }
+
+    const count: usize = if (text.len == 0)
+        0
+    else
+        tokenizer.encode_into(text, false, &buffers.tok_scratch, buffers.prompt_tokens);
+
+    var bw = tiger.ByteWriter.init(buffers.response_buf);
+    bw.append_fmt("{{\"length\":{d},\"count\":{d}}}", .{ count, count });
+    send_json_response(fd, 200, bw.slice());
 }
 
 fn handle_chat_completions(
