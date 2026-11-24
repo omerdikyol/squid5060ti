@@ -2532,8 +2532,8 @@ fn compute_runtime_vram_bytes(
             const is_loc = constants.is_mtp_local_layer(ml);
             const cap: u32 = if (is_loc)
                 (constants.swa_window_tokens + constants.mtp_block_size_max)
-            else if (context_tokens_max > 524_288)
-                65_536
+            else if (context_tokens_max > 16_384)
+                16_384
             else
                 context_tokens_max;
             const lfmt: constants.KVFormat = if (is_loc) .bf16 else kv_format;
