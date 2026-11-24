@@ -117,9 +117,9 @@ const PromptLookupIndex = struct {
 
 const prefix_checkpoint_count: usize = 4;
 const side_shield_max_tokens: u32 = 4096;
-const prefill_batch_max: u32 = 512;
-const prefill_local_attn_sub: u32 = 256;
-const prefill_sub_chunks_max: u32 = prefill_batch_max / constants.mtp_block_size_max; // 64
+const prefill_batch_max: u32 = 128;
+const prefill_local_attn_sub: u32 = 128;
+const prefill_sub_chunks_max: u32 = prefill_batch_max / constants.mtp_block_size_max; // 16
 
 inline fn offset_f16_ptr(base: *anyopaque, elem_offset: usize) *anyopaque {
     const bytes: [*]u8 = @ptrCast(base);
@@ -343,8 +343,8 @@ pub const Engine = struct {
                 const is_loc: bool = constants.is_mtp_local_layer(ml);
                 const cap: u32 = if (is_loc)
                     (constants.swa_window_tokens + constants.mtp_block_size_max)
-                else if (context_tokens_max > 524_288)
-                    65_536
+                else if (context_tokens_max > 16_384)
+                    16_384
                 else
                     context_tokens_max;
                 const lfmt: constants.KVFormat = if (is_loc) .bf16 else kv_format;
