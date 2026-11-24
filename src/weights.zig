@@ -63,6 +63,7 @@ pub const ModelWeights = struct {
     mode: constants.QuantMode = .nvfp4,
     arena: vram_arena.VRAMArena = .{},
     pinned_host_embed: ?*anyopaque = null,
+    pinned_host_markov_w1: ?*anyopaque = null,
 
     embed: ?*anyopaque = null,
     embed_norm: ?*anyopaque = null,
@@ -84,6 +85,10 @@ pub const ModelWeights = struct {
         if (self.pinned_host_embed) |host_ptr| {
             tiger.assert_cuda(cuda.squid_cuda_free_host(host_ptr));
             self.pinned_host_embed = null;
+        }
+        if (self.pinned_host_markov_w1) |host_ptr| {
+            tiger.assert_cuda(cuda.squid_cuda_free_host(host_ptr));
+            self.pinned_host_markov_w1 = null;
         }
         self.* = .{};
     }
@@ -172,12 +177,15 @@ pub const ModelWeights = struct {
         );
         self.arena = vram_arena.VRAMArena.init(total_vram_bytes);
 
-        // Temporary staging buffers on GPU for BF16 upload & quantization (freed before returning)
+        // Zero-copy pinned host staging buffer for load-time quantization (0 extra VRAM spike on 16 GiB GPUs!)
         const stage_bytes: u64 = @as(u64, constants.vocab_unpadded_count) * constants.hidden_dim * 2;
+        var h_stage_opt: ?*anyopaque = null;
+        tiger.assert_cuda(cuda.squid_cuda_malloc_host_pinned(&h_stage_opt, @intCast(stage_bytes), 1));
+        const h_stage: *anyopaque = h_stage_opt.?;
+        defer tiger.assert_cuda(cuda.squid_cuda_free_host(h_stage));
         var d_stage_opt: ?*anyopaque = null;
-        tiger.assert_cuda(cuda.squid_cuda_malloc(&d_stage_opt, @intCast(stage_bytes)));
+        tiger.assert_cuda(cuda.squid_cuda_host_get_device_pointer(&d_stage_opt, h_stage));
         const d_stage: *anyopaque = d_stage_opt.?;
-        defer tiger.assert_cuda(cuda.squid_cuda_free(d_stage));
 
         var d_amax_opt: ?*anyopaque = null;
         tiger.assert_cuda(cuda.squid_cuda_malloc(&d_amax_opt, @sizeOf(f32)));
@@ -367,6 +375,7 @@ pub const ModelWeights = struct {
                 &sf_main,
                 &sf_mtp,
                 mtp_kind,
+                embed_on_host,
                 d_stage,
                 d_amax,
                 has_pruned_draft_vocab,
@@ -550,6 +559,7 @@ pub const ModelWeights = struct {
         sf_main: *const safetensors.SafetensorsFile,
         sf_mtp: *const safetensors.SafetensorsFile,
         mtp_kind: constants.WeightKind,
+        embed_on_host: bool,
         d_stage: *anyopaque,
         d_amax: *f32,
         has_pruned_draft_vocab: bool,
@@ -589,7 +599,21 @@ pub const ModelWeights = struct {
         self.dspark.mask_embed = self.upload_bf16(sf_mtp, "mask_embed", constants.hidden_dim);
         self.dspark.norm_w = self.upload_bf16(sf_mtp, "norm.weight", constants.hidden_dim);
         self.dspark.markov_dflare_norm = self.upload_bf16(sf_mtp, "markov_head.dflare_norm.weight", constants.hidden_dim);
-        self.dspark.markov_w1 = self.upload_bf16(sf_mtp, "markov_head.markov_w1.weight", @as(u64, constants.vocab_padded_count) * constants.mtp_markov_rank);
+        if (embed_on_host) {
+            const mw_info = sf_mtp.lookup("markov_head.markov_w1.weight");
+            const mw_bytes: usize = @as(usize, constants.vocab_padded_count) * constants.mtp_markov_rank * 2;
+            tiger.assert(mw_info.byte_length == mw_bytes);
+            var h_mw: ?*anyopaque = null;
+            tiger.assert_cuda(cuda.squid_cuda_malloc_host_pinned(&h_mw, mw_bytes, 1));
+            self.pinned_host_markov_w1 = h_mw;
+            const dst_mw = @as([*]u8, @ptrCast(h_mw.?))[0..mw_bytes];
+            @memcpy(dst_mw, sf_mtp.data_slice(mw_info));
+            var dev_mw: ?*anyopaque = null;
+            tiger.assert_cuda(cuda.squid_cuda_host_get_device_pointer(&dev_mw, h_mw.?));
+            self.dspark.markov_w1 = dev_mw;
+        } else {
+            self.dspark.markov_w1 = self.upload_bf16(sf_mtp, "markov_head.markov_w1.weight", @as(u64, constants.vocab_padded_count) * constants.mtp_markov_rank);
+        }
         self.dspark.rnn_bias = self.upload_bf16(sf_mtp, "markov_head.rnn_proj.bias", 3 * constants.mtp_markov_rank);
         self.dspark.hidden_out_w = self.upload_bf16(sf_mtp, "markov_head.hidden_out.weight", @as(u64, constants.hidden_dim) * constants.mtp_markov_rank);
         self.dspark.hidden_out_b = self.upload_bf16(sf_mtp, "markov_head.hidden_out.bias", constants.hidden_dim);
@@ -637,11 +661,14 @@ pub const ModelWeights = struct {
             }
 
             self.dspark.fold_b = self.arena.alloc_many(f32, draft_vocab_count);
-            var d_fold_bf16_opt: ?*anyopaque = null;
+            var h_fold_bf16_opt: ?*anyopaque = null;
             const fold_bytes: u64 = @as(u64, draft_vocab_count) * constants.mtp_markov_rank * 2;
-            tiger.assert_cuda(cuda.squid_cuda_malloc(&d_fold_bf16_opt, @intCast(fold_bytes)));
+            tiger.assert_cuda(cuda.squid_cuda_malloc_host_pinned(&h_fold_bf16_opt, @intCast(fold_bytes), 1));
+            const h_fold_bf16: *anyopaque = h_fold_bf16_opt.?;
+            defer tiger.assert_cuda(cuda.squid_cuda_free_host(h_fold_bf16));
+            var d_fold_bf16_opt: ?*anyopaque = null;
+            tiger.assert_cuda(cuda.squid_cuda_host_get_device_pointer(&d_fold_bf16_opt, h_fold_bf16));
             const d_fold_bf16: *anyopaque = d_fold_bf16_opt.?;
-            defer tiger.assert_cuda(cuda.squid_cuda_free(d_fold_bf16));
 
             cuda.squid_compute_dspark_fold(
                 d_stage,
@@ -974,7 +1001,9 @@ fn compute_total_vram_bytes(
         total += tiger.align_up_u64(constants.hidden_dim * 2, a); // mask_embed
         total += tiger.align_up_u64(constants.hidden_dim * 2, a); // norm_w
         total += tiger.align_up_u64(constants.hidden_dim * 2, a); // markov_dflare_norm
-        total += tiger.align_up_u64(@as(u64, constants.vocab_padded_count) * constants.mtp_markov_rank * 2, a); // markov_w1
+        if (!embed_on_host) {
+            total += tiger.align_up_u64(@as(u64, constants.vocab_padded_count) * constants.mtp_markov_rank * 2, a); // markov_w1
+        }
         total += tiger.align_up_u64(3 * constants.mtp_markov_rank * 2, a); // rnn_bias
         total += tiger.align_up_u64(@as(u64, constants.hidden_dim) * constants.mtp_markov_rank * 2, a); // hidden_out_w
         total += tiger.align_up_u64(constants.hidden_dim * 2, a); // hidden_out_b

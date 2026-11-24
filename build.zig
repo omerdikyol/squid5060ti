@@ -27,6 +27,12 @@ pub fn build(b: *std.Build) void {
         "CUDA toolkit root directory (default: /usr/local/cuda)",
     ) orelse "/usr/local/cuda";
 
+    const ccbin = b.option(
+        []const u8,
+        "ccbin",
+        "Optional host C++ compiler for nvcc (e.g. g++-14 on Ubuntu 26.04)",
+    );
+
     const nvcc_bin = b.fmt("{s}/bin/nvcc", .{cuda_path});
     const cuda_lib = b.fmt("{s}/lib64", .{cuda_path});
     const gencode = b.fmt("arch=compute_{s},code=sm_{s}", .{ cuda_arch, cuda_arch });
@@ -56,8 +62,11 @@ pub fn build(b: *std.Build) void {
     };
 
     for (cuda_sources) |cu| {
-        const nvcc = b.addSystemCommand(&.{
-            nvcc_bin,
+        const nvcc = b.addSystemCommand(&.{nvcc_bin});
+        if (ccbin) |host_cxx| {
+            nvcc.addArgs(&.{ "-ccbin", host_cxx });
+        }
+        nvcc.addArgs(&.{
             "-O3",
             "--use_fast_math",
             "-std=c++20",
@@ -85,7 +94,7 @@ pub fn build(b: *std.Build) void {
     root_module.linkSystemLibrary("pthread", .{});
 
     const exe = b.addExecutable(.{
-        .name = "squid5090",
+        .name = "squid5060ti",
         .root_module = root_module,
     });
     b.installArtifact(exe);

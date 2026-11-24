@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     var port: u16 = 8000;
     var mtp: u32 = if (std.mem.eql(u8, command, "serve")) 7 else 0;
-    var spec_threshold: f32 = 0.80;
+    var spec_threshold: f32 = 0.90;
     var temperature: f32 = if (std.mem.eql(u8, command, "serve")) 1.0 else 0.0;
     var top_p: f32 = 0.95;
     var top_k: i32 = 0;
@@ -178,12 +178,10 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         .q4
     else if (quant_mode == .exact)
         .bf16
-    else if (ctx > 458_752)
-        .q4
     else
-        .fp8;
+        .q4;
 
-    if (ctx > 524_288 and quant_mode != .exact) {
+    if (quant_mode != .exact) {
         embed_on_host = true;
     }
 

@@ -94,7 +94,7 @@ struct SampleConfig {
     uint64_t seed;
 };
 
-constexpr int KV_SPLIT_K = 64;    // 8 KV heads x 64 bulk splits = 512 CTAs (3.0 blocks/SM!)
+constexpr int KV_SPLIT_K = 64;    // 8 KV heads x 64 bulk splits = 512 CTAs (verified fastest at 32K+ on RTX 5060 Ti)
 constexpr int KV_LOCAL_SPLITS = 17; // 17 x 64 = 1088 >= 1024+8 (1 single tile per CTA!)
 constexpr int KV_TOTAL_SPLITS = KV_SPLIT_K + KV_LOCAL_SPLITS; // 81 slots in split_buf
 constexpr int KV_Q4_GROUP = 64;  // 2 groups per 128-dim head
